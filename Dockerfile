@@ -4,7 +4,7 @@ ARG BASE_IMAGE=ubuntu:$BASE_VERSION
 
 #FROM ${BASE_IMAGE} AS documentserver
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS documentserver
 LABEL maintainer Ascensio System SIA <support@onlyoffice.com>
 
 ARG BASE_VERSION
