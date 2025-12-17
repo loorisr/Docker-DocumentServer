@@ -2,7 +2,9 @@ ARG BASE_VERSION=24.04
 
 ARG BASE_IMAGE=ubuntu:$BASE_VERSION
 
-FROM ${BASE_IMAGE} AS documentserver
+#FROM ${BASE_IMAGE} AS documentserver
+
+FROM debian:bookworm-slim
 LABEL maintainer Ascensio System SIA <support@onlyoffice.com>
 
 ARG BASE_VERSION
