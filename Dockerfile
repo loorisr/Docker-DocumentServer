@@ -62,9 +62,17 @@ ARG PACKAGE_BASEURL="http://download.onlyoffice.com/install/documentserver/linux
 RUN TARGETARCH=$(dpkg --print-architecture) && \
     wget -q "${PACKAGE_BASEURL}/${COMPANY_NAME}-${PRODUCT_NAME}_${TARGETARCH}.deb" -O /tmp/ds.deb && \
     apt-get update && \
-    # Install .deb and resolve dependencies automatically
+    # --- CRITICAL FIX START ---
+    # 1. Start PostgreSQL (the installer needs it live)
+    service postgresql start && \
+    # 2. Pre-create the database so the installer finds it
+    su - postgres -c "psql -c \"CREATE USER onlyoffice WITH password 'onlyoffice';\"" && \
+    su - postgres -c "psql -c \"CREATE DATABASE onlyoffice OWNER onlyoffice;\"" && \
+    # 3. Install the package
     (dpkg -i /tmp/ds.deb || apt-get install -f -y) && \
-    # Cleanup post-install
+    # 4. Stop services to keep the layer clean
+    service postgresql stop && \
+    # --- CRITICAL FIX END ---
     rm /tmp/ds.deb && \
     chmod 755 /etc/init.d/supervisor && \
     chmod 755 /app/ds/*.sh && \
