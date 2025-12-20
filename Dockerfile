@@ -1,85 +1,79 @@
-# Stage 1: Fetcher (Downloads and prepares Oracle Instant Client)
-FROM debian:bookworm-slim AS fetcher
-RUN apt-get update && apt-get install -y --no-install-recommends unzip wget ca-certificates
+ARG BASE_VERSION=24.04
 
-ARG OC_PATH=2370000
-ARG OC_FILE_SUFFIX=23.7.0.25.01
-ENV OC_DOWNLOAD_URL=https://download.oracle.com/otn_software/linux/instantclient/${OC_PATH}
+ARG BASE_IMAGE=ubuntu:$BASE_VERSION
 
-RUN wget -q -O basic.zip ${OC_DOWNLOAD_URL}/instantclient-basic-linux.x64-${OC_FILE_SUFFIX}.zip && \
-    wget -q -O sqlplus.zip ${OC_DOWNLOAD_URL}/instantclient-sqlplus-linux.x64-${OC_FILE_SUFFIX}.zip && \
-    mkdir -p /opt/oracle && \
-    unzip -oq basic.zip -d /opt/oracle && \
-    unzip -oq sqlplus.zip -d /opt/oracle && \
-    mv /opt/oracle/instantclient_23_7 /opt/oracle/instantclient
+FROM ${BASE_IMAGE} AS documentserver
 
-# Stage 2: Final Image
-FROM debian:bookworm-slim AS documentserver
-LABEL maintainer Ascensio System SIA <support@onlyoffice.com>
+ARG BASE_VERSION
+ARG PG_VERSION=16
 
-# Set Environment Variables
-ENV LANG=en_US.UTF-8 \
-    LANGUAGE=en_US:en \
-    LC_ALL=en_US.UTF-8 \
-    DEBIAN_FRONTEND=noninteractive \
-    PG_VERSION=16 \
-    COMPANY_NAME=onlyoffice \
-    PRODUCT_NAME=documentserver \
-    LD_LIBRARY_PATH=/usr/share/instantclient:$LD_LIBRARY_PATH
+ENV LANG=en_US.UTF-8 LANGUAGE=en_US:en LC_ALL=en_US.UTF-8 DEBIAN_FRONTEND=noninteractive PG_VERSION=${PG_VERSION} BASE_VERSION=${BASE_VERSION}
 
-# 1. Fix Locales and Repositories (Enable contrib for fonts)
-RUN apt-get update && apt-get install -y --no-install-recommends locales && \
-    sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen && \
-    locale-gen en_US.UTF-8 && \
-    sed -i 's/main/main contrib non-free/g' /etc/apt/sources.list.d/debian.sources || \
-    sed -i 's/main/main contrib non-free/g' /etc/apt/sources.list
-
-# 2. Install Core Dependencies
-RUN echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | debconf-set-selections && \
-    apt-get update && apt-get install -y --no-install-recommends \
-    wget gnupg lsb-release ca-certificates apt-transport-https \
-    adduser bomstrip certbot cron curl \
-    libaio1 libasound2 libcairo2 libcurl3-gnutls libcurl4 libgtk-3-0 \
-    libnspr4 libnss3 libstdc++6 libxml2 libxss1 libxtst6 \
-    nginx-extras postgresql-client pwgen redis-server rabbitmq-server \
-    supervisor ttf-mscorefonts-installer unixodbc-dev unzip xvfb xxd zlib1g && \
-    # 3. Setup Microsoft SQL Tools (Debian 12 version)
-    wget -q -O- https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /usr/share/keyrings/microsoft-prod.gpg && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql-release.list && \
-    apt-get update && ACCEPT_EULA=Y apt-get install -y mssql-tools18 && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# 4. Copy Oracle Client and Custom Assets
-COPY --from=fetcher /opt/oracle/instantclient /usr/share/instantclient
-COPY oracle/sqlplus /usr/bin/sqlplus
 COPY fonts/ /usr/share/fonts/truetype/
+
+RUN echo "#!/bin/sh\nexit 0" > /usr/sbin/policy-rc.d && \
+    apt-get -y update && \
+    apt-get -yq install wget apt-transport-https gnupg locales lsb-release && \
+    wget -q -O /etc/apt/sources.list.d/mssql-release.list "https://packages.microsoft.com/config/ubuntu/$BASE_VERSION/prod.list" && \
+    wget -q -O /tmp/microsoft.asc https://packages.microsoft.com/keys/microsoft.asc && \
+    apt-key add /tmp/microsoft.asc && \
+    gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg < /tmp/microsoft.asc && \
+    apt-get -y update && \
+    locale-gen en_US.UTF-8 && \
+    echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | debconf-set-selections && \
+    ACCEPT_EULA=Y apt-get -yq install \
+        netcat-openbsd \
+        nginx-extras \
+        postgresql \
+        postgresql-client \
+        pwgen \
+        rabbitmq-server \
+        sudo \
+        supervisor \
+        ttf-mscorefonts-installer && \
+        #zlib1g || dpkg --configure -a && \
+    if [  $(find /usr/share/fonts/truetype/msttcorefonts -maxdepth 1 -type f -iname '*.ttf' | wc -l) -lt 30 ]; \
+        then echo 'msttcorefonts failed to download'; exit 1; fi  && \
+    echo "SERVER_ADDITIONAL_ERL_ARGS=\"+S 1:1\"" | tee -a /etc/rabbitmq/rabbitmq-env.conf && \
+    sed 's|\(application\/zip.*\)|\1\n    application\/wasm wasm;|' -i /etc/nginx/mime.types && \
+    pg_conftool $PG_VERSION main set listen_addresses 'localhost' && \
+    service postgresql restart && \
+    sudo -u postgres psql -c "CREATE USER onlyoffice WITH password 'onlyoffice';" && \
+    sudo -u postgres psql -c "CREATE DATABASE onlyoffice OWNER onlyoffice;" && \
+    service postgresql stop && \
+    service rabbitmq-server stop && \
+    service supervisor stop && \
+    service nginx stop && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY config/supervisor/supervisor /etc/init.d/
 COPY config/supervisor/ds/*.conf /etc/supervisor/conf.d/
 COPY run-document-server.sh /app/ds/run-document-server.sh
 
-# 5. Install ONLYOFFICE Document Server
+EXPOSE 80
+
+ARG TARGETARCH
 ARG PACKAGE_BASEURL="http://download.onlyoffice.com/install/documentserver/linux"
-RUN TARGETARCH=$(dpkg --print-architecture) && \
-    wget -q "${PACKAGE_BASEURL}/${COMPANY_NAME}-${PRODUCT_NAME}_${TARGETARCH}.deb" -O /tmp/ds.deb && \
-    apt-get update && \
-    # --- CRITICAL FIX START ---
-    # 1. Start PostgreSQL (the installer needs it live)
+
+ENV COMPANY_NAME=onlyoffice \
+    PRODUCT_NAME=documentserver \
+    DS_PLUGIN_INSTALLATION=false \
+    DS_DOCKER_INSTALLATION=true
+
+RUN PACKAGE_FILE="onlyoffice-documentserver_${TARGETARCH:-$(dpkg --print-architecture)}.deb" && \
+    wget -q -P /tmp "$PACKAGE_BASEURL/$PACKAGE_FILE" && \
+    apt-get -y update && \
     service postgresql start && \
-    # 2. Pre-create the database so the installer finds it
-    su - postgres -c "psql -c \"CREATE USER onlyoffice WITH password 'onlyoffice';\"" && \
-    su - postgres -c "psql -c \"CREATE DATABASE onlyoffice OWNER onlyoffice;\"" && \
-    # 3. Install the package
-    (dpkg -i /tmp/ds.deb || apt-get install -f -y) && \
-    # 4. Stop services to keep the layer clean
+    apt-get -yq install /tmp/$PACKAGE_FILE && \
+    PGPASSWORD=onlyoffice dropdb -h localhost -p 5432 -U onlyoffice onlyoffice && \
+    sudo -u postgres psql -c "DROP ROLE onlyoffice;" && \
     service postgresql stop && \
-    # --- CRITICAL FIX END ---
-    rm /tmp/ds.deb && \
     chmod 755 /etc/init.d/supervisor && \
+    sed "s/COMPANY_NAME/onlyoffice/g" -i /etc/supervisor/conf.d/*.conf && \
+    service supervisor stop && \
     chmod 755 /app/ds/*.sh && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-
-EXPOSE 80 443
-
-VOLUME /var/log/$COMPANY_NAME /var/lib/$COMPANY_NAME /var/www/$COMPANY_NAME/Data /var/lib/postgresql /var/lib/rabbitmq /var/lib/redis /usr/share/fonts/truetype/custom
+    rm -f /tmp/$PACKAGE_FILE && \
+    rm -rf /var/log/onlyoffice && \
+    rm -rf /var/lib/apt/lists/*
 
 ENTRYPOINT ["/app/ds/run-document-server.sh"]
